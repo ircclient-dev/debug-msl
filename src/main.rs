@@ -7,7 +7,7 @@ use windows::Win32::System::Memory::{
     CreateFileMappingW, MapViewOfFile, UnmapViewOfFile, FILE_MAP_ALL_ACCESS, PAGE_READWRITE,
 };
 use windows::Win32::System::ProcessStatus::GetModuleBaseNameW;
-use windows::Win32::System::Threading::GetProcessHandleFromHwnd;
+use windows::Win32::System::Threading::{GetProcessHandleFromHwnd, GetProcessId};
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, IsWindowVisible, SendMessageW, WM_USER,
 };
@@ -19,7 +19,8 @@ fn main() {
     // Make sure we've received arguments
     println!("Arguments: {:?}", std::env::args().collect::<Vec<String>>());
     if std::env::args().len() == 1 {
-        println!("Usage: debug-msl.exe <mSL code to run>");
+        println!("Usage: debug-msl.exe [-p] <mSL code to run>");
+        println!("-p: Print the process name and PID target clients");
         return;
     }
 
@@ -52,16 +53,24 @@ extern "system" fn enum_windows_proc(hwnd: HWND, _: LPARAM) -> BOOL {
                         match m_eval {
                             Ok(m_eval) => {
                                 // We've received a reply from the IRC client
-                                let m_eval = m_eval.to_string().unwrap();
-                                println!("Sent command to {} {}", process_name, m_eval);
-
+                                
                                 let args: Vec<String> = std::env::args().collect();
                                 let args_string = args[1..].join(" ");
-                                let message = format!("//{}\0", args_string);
-                                let message_wide: Vec<u16> = message.encode_utf16().collect();
-                                let message_pcwstr = PCWSTR(message_wide.as_ptr());
-                                let _ =
-                                    send_message_to_irc_client(hwnd, WM_MCOMMAND, &message_pcwstr);
+
+                                if args[1] == "-p" {
+                                    let pid = GetProcessId(process_handle);
+                                    println!("{} (PID: {})", process_name, pid);
+                                }
+                                else {
+                                    let m_eval = m_eval.to_string().unwrap();
+                                    println!("Sent command to {} {}", process_name, m_eval);
+                                    
+                                    let message = format!("//{}\0", args_string);
+                                    let message_wide: Vec<u16> = message.encode_utf16().collect();
+                                    let message_pcwstr = PCWSTR(message_wide.as_ptr());
+                                    let _ =
+                                        send_message_to_irc_client(hwnd, WM_MCOMMAND, &message_pcwstr);
+                                }
                             }
                             Err(_) => {}
                         }
