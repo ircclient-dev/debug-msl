@@ -1,13 +1,11 @@
 use windows::core::{w, PCSTR, PCWSTR};
 use windows::Win32::Foundation::{BOOL, HANDLE, HWND, LPARAM, WPARAM};
-use windows::Win32::Globalization::{
-    lstrlenA, MultiByteToWideChar, WideCharToMultiByte, CP_UTF8, MULTI_BYTE_TO_WIDE_CHAR_FLAGS,
-};
+use windows::Win32::Globalization::{WideCharToMultiByte, CP_UTF8};
 use windows::Win32::System::Memory::{
     CreateFileMappingW, MapViewOfFile, UnmapViewOfFile, FILE_MAP_ALL_ACCESS, PAGE_READWRITE,
 };
 use windows::Win32::System::ProcessStatus::GetModuleBaseNameW;
-use windows::Win32::System::Threading::{GetProcessHandleFromHwnd, GetProcessId};
+use windows::Win32::System::Threading::GetProcessHandleFromHwnd;
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, IsWindowVisible, SendMessageW, WM_USER,
 };
@@ -17,12 +15,10 @@ const WM_MEVALUATE: u32 = WM_USER + 201;
 
 fn main() {
     // Make sure we've received arguments
-    println!("Arguments: {:?}", std::env::args().collect::<Vec<String>>());
-    if std::env::args().len() == 1 {
-        println!("Usage: debug-msl.exe [-p] <mSL code to run>");
-        println!("-p: Print the process name and PID target clients");
-        return;
-    }
+    // if std::env::args().len() == 1 {
+    //     println!("Usage: debug-msl.exe <mSL code to run>");
+    //     return;
+    // }
 
     if unsafe { EnumWindows(Some(enum_windows_proc), LPARAM(0)).is_err() } {
         println!("Unable to enumerate windows");
@@ -31,20 +27,24 @@ fn main() {
 
 extern "system" fn enum_windows_proc(hwnd: HWND, _: LPARAM) -> BOOL {
     unsafe {
-        // Skip invisible windows (eg. Minimised to tray)
+        // Ensure the window is visible
         if IsWindowVisible(hwnd).as_bool() {
-            // We want process handle, so we can determine the process name
+            // Get process handle from window handle
             let process_handle = GetProcessHandleFromHwnd(hwnd);
             if !process_handle.is_invalid() {
-                // Get the process name (allowing max 256 characters)
+                // Get the process name from the process handle
                 let mut process_name = [0; 256];
-                let name_length = GetModuleBaseNameW(process_handle, None, &mut process_name);
-                if name_length > 0 {
-                    let process_name_slice = &process_name[..name_length as usize];
+                let process_name_length =
+                    GetModuleBaseNameW(process_handle, None, &mut process_name);
+                if process_name_length > 0 {
+                    let process_name_slice = &process_name[..process_name_length as usize];
                     let process_name = PCWSTR(process_name_slice.as_ptr()).to_string().unwrap();
+
+                    // Check if the process is mIRC or AdiIRC
                     if process_name.to_lowercase() == "mirc.exe"
                         || process_name.to_lowercase() == "adiirc.exe"
                     {
+                        // Send a message to the IRC client to evaluate the version and bitness
                         let m_eval = send_message_to_irc_client(
                             hwnd,
                             WM_MEVALUATE,
@@ -52,25 +52,25 @@ extern "system" fn enum_windows_proc(hwnd: HWND, _: LPARAM) -> BOOL {
                         );
                         match m_eval {
                             Ok(m_eval) => {
-                                // We've received a reply from the IRC client
-                                
+                                // We got a reply from the IRC client, so we know it's valid.
+                                let m_result = PCWSTR(m_eval.as_ptr());
+
                                 let args: Vec<String> = std::env::args().collect();
                                 let args_string = args[1..].join(" ");
 
-                                if args[1] == "-p" {
-                                    let pid = GetProcessId(process_handle);
-                                    println!("{} (PID: {})", process_name, pid);
-                                }
-                                else {
-                                    let m_eval = m_eval.to_string().unwrap();
-                                    println!("Sent command to {} {}", process_name, m_eval);
-                                    
-                                    let message = format!("//{}\0", args_string);
-                                    let message_wide: Vec<u16> = message.encode_utf16().collect();
-                                    let message_pcwstr = PCWSTR(message_wide.as_ptr());
-                                    let _ =
-                                        send_message_to_irc_client(hwnd, WM_MCOMMAND, &message_pcwstr);
-                                }
+                                let message = format!("//{}\0", args_string);
+                                let mut message_wide: Vec<u16> = message.encode_utf16().collect();
+                                message_wide.push(0); // Our Vec<u16> needs to be null-terminated to be a valid PCWSTR;
+                                let message_pcwstr = PCWSTR(message_wide.as_ptr());
+                                let _ =
+                                    send_message_to_irc_client(hwnd, WM_MCOMMAND, &message_pcwstr);
+
+                                // Let the user know we've sent the command
+                                println!(
+                                    "Sent command to {} {}",
+                                    process_name,
+                                    m_result.to_string().unwrap()
+                                );
                             }
                             Err(_) => {}
                         }
@@ -86,7 +86,7 @@ fn send_message_to_irc_client(
     hwnd: HWND,
     message_type: u32,
     message: &PCWSTR,
-) -> Result<PCWSTR, String> {
+) -> Result<Vec<u16>, String> {
     // Sanity check
     if (message_type != WM_MCOMMAND) && (message_type != WM_MEVALUATE) {
         return Err("Invalid message type".to_string());
@@ -151,24 +151,10 @@ fn send_message_to_irc_client(
         }
 
         // Get the reply from IRC Client
-        let reply_mb = PCSTR(map_view.Value as *const u8);
-
-        // Convert the reply from UTF-8 to Unicode
-        let reply_mb_slice = std::slice::from_raw_parts(reply_mb.0, lstrlenA(reply_mb) as usize);
-        let reply_wide_length = MultiByteToWideChar(
-            CP_UTF8,
-            MULTI_BYTE_TO_WIDE_CHAR_FLAGS(0),
-            reply_mb_slice,
-            None,
-        );
-        let mut reply_wide_vec = vec![0u16; (reply_wide_length as usize) + 1];
-        MultiByteToWideChar(
-            CP_UTF8,
-            MULTI_BYTE_TO_WIDE_CHAR_FLAGS(0),
-            reply_mb_slice,
-            Some(&mut reply_wide_vec),
-        );
-        let reply = PCWSTR(reply_wide_vec.as_ptr());
+        let reply_multibyte: PCSTR = PCSTR(map_view.Value as *const u8);
+        let reply_str = reply_multibyte.to_string().unwrap();
+        let mut reply_wide: Vec<u16> = reply_str.encode_utf16().collect();
+        reply_wide.push(0); // Our Vec<u16> needs to be null-terminated to be a valid PCWSTR
 
         //////////////////////////////
         // END OF ADIIRC WORKAROUND //
@@ -178,6 +164,6 @@ fn send_message_to_irc_client(
 
         // Clean up
         let _ = UnmapViewOfFile(map_view);
-        Ok(reply)
+        Ok(reply_wide)
     }
 }
